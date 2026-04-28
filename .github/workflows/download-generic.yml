@@ -1,0 +1,59 @@
+name: Generic Downloader (yt-dlp)
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: 'URL del video, playlist o canale'
+        required: true
+      drive_folder:
+        description: 'Cartella Drive (es. Video/MieiDownload)'
+        required: true
+        default: 'Downloads'
+      filename:
+        description: 'Template nome file (vuoto = titolo originale)'
+        required: false
+        default: ''
+      format:
+        description: 'Formato/qualità (es. best, bestvideo+bestaudio, best[height<=1080])'
+        required: false
+        default: 'best'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+    steps:
+      - name: Setup
+        run: |
+          sudo apt update -qq
+          sudo apt install -y ffmpeg rclone
+          pip install -U yt-dlp
+
+      - name: Configura rclone
+        run: |
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
+
+      - name: Scarica
+        env:
+          URL: ${{ github.event.inputs.url }}
+          FMT: ${{ github.event.inputs.format }}
+          FN:  ${{ github.event.inputs.filename }}
+        run: |
+          mkdir -p /tmp/out
+          if [ -z "$FN" ]; then
+            OUTTPL="/tmp/out/%(title)s.%(ext)s"
+          else
+            OUTTPL="/tmp/out/${FN}.%(ext)s"
+          fi
+          yt-dlp -f "$FMT" --merge-output-format mp4 \
+            --concurrent-fragments 16 -N 16 --retries 10 \
+            --no-warnings -o "$OUTTPL" "$URL"
+
+      - name: Carica su Drive
+        env:
+          DRIVE_FOLDER: ${{ github.event.inputs.drive_folder }}
+        run: |
+          rclone copy /tmp/out "gdrive:$DRIVE_FOLDER/" --progress
+          ls -lh /tmp/out
