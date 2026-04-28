@@ -1,23 +1,19 @@
-name: Generic Downloader (yt-dlp)
+name: Anime Downloader
 
 on:
   workflow_dispatch:
     inputs:
-      url:
-        description: 'URL del video, playlist o canale'
+      anime_url:
+        description: 'URL pagina anime'
         required: true
+      prefix:
+        description: 'Prefisso file'
+        required: true
+        default: 'Anime'
       drive_folder:
-        description: 'Cartella Drive (es. Video/MieiDownload)'
+        description: 'Cartella Drive'
         required: true
-        default: 'Downloads'
-      filename:
-        description: 'Template nome file (vuoto = titolo originale)'
-        required: false
-        default: ''
-      format:
-        description: 'Formato/qualità (es. best, bestvideo+bestaudio, best[height<=1080])'
-        required: false
-        default: 'best'
+        default: 'Anime'
 
 jobs:
   download:
@@ -28,32 +24,87 @@ jobs:
         run: |
           sudo apt update -qq
           sudo apt install -y ffmpeg rclone
-          pip install -U yt-dlp
+          pip install yt-dlp playwright requests
+          playwright install chromium --with-deps
 
       - name: Configura rclone
         run: |
           mkdir -p ~/.config/rclone
           echo "${{ secrets.RCLONE_CONF }}" > ~/.config/rclone/rclone.conf
 
-      - name: Scarica
+      - name: Scarica e carica su Drive
         env:
-          URL: ${{ github.event.inputs.url }}
-          FMT: ${{ github.event.inputs.format }}
-          FN:  ${{ github.event.inputs.filename }}
-        run: |
-          mkdir -p /tmp/out
-          if [ -z "$FN" ]; then
-            OUTTPL="/tmp/out/%(title)s.%(ext)s"
-          else
-            OUTTPL="/tmp/out/${FN}.%(ext)s"
-          fi
-          yt-dlp -f "$FMT" --merge-output-format mp4 \
-            --concurrent-fragments 16 -N 16 --retries 10 \
-            --no-warnings -o "$OUTTPL" "$URL"
-
-      - name: Carica su Drive
-        env:
+          ANIME_URL: ${{ github.event.inputs.anime_url }}
+          PREFIX: ${{ github.event.inputs.prefix }}
           DRIVE_FOLDER: ${{ github.event.inputs.drive_folder }}
         run: |
-          rclone copy /tmp/out "gdrive:$DRIVE_FOLDER/" --progress
-          ls -lh /tmp/out
+          python3 <<'EOF'
+          import os, re, subprocess, time, requests
+          from playwright.sync_api import sync_playwright
+
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+          ANIME_URL = os.environ["ANIME_URL"]
+          PREFIX    = os.environ["PREFIX"]
+          DRIVE     = os.environ["DRIVE_FOLDER"]
+          OUT = "/tmp/out"; os.makedirs(OUT, exist_ok=True)
+
+          pw = sync_playwright().start()
+          browser = pw.chromium.launch(headless=True, args=['--disable-blink-features=AutomationControlled'])
+          ctx = browser.new_context(user_agent=UA, viewport={'width':1280,'height':800})
+          page = ctx.new_page()
+
+          def fetch(url):
+              page.goto(url, wait_until="domcontentloaded", timeout=60000)
+              try: page.wait_for_load_state("networkidle", timeout=15000)
+              except: pass
+              return page.content()
+
+          def speed(url, ref):
+              try:
+                  r = requests.get(url, headers={"Referer": ref, "User-Agent": UA, "Range":"bytes=0-2097151"}, stream=True, timeout=8)
+                  t0, tot = time.time(), 0
+                  for c in r.iter_content(8192): tot += len(c)
+                  dt = time.time() - t0
+                  return round((tot/1024/1024)/dt, 2) if dt > 0 else 0
+              except: return 0
+
+          html = fetch(ANIME_URL)
+          print(f"DEBUG html len: {len(html)}")
+          eps = sorted(set(re.findall(r'https?://[^"\'<>]*?/ep/[^"\'<>]+', html)),
+                       key=lambda u: int(re.search(r'ep-(\d+)$', u).group(1)) if re.search(r'ep-(\d+)$', u) else 9999)
+          print(f"Trovati {len(eps)} episodi")
+
+          for i, ep in enumerate(eps, 1):
+              print(f"\n=== Ep {i} ===")
+              try:
+                  ep_html = fetch(ep)
+                  watches = list(set(re.findall(r'https?://[^"\'<>]*?/watch\?[^"\'<>]+', ep_html)))
+                  cands = []
+                  for w in watches:
+                      try:
+                          wp = fetch(w)
+                          m = re.search(r'https?://[^\s"\'<>]+\.(m3u8|mp4)[^\s"\'<>]*', wp)
+                          if m: cands.append((m.group(0), w))
+                      except Exception as e: print(f"    err watch: {e}")
+                  cands = list({u:(u,r) for u,r in cands}.values())
+                  if not cands: print("  Nessuno stream"); continue
+                  best, bs = None, 0
+                  for u, r in cands:
+                      sp = speed(u, r)
+                      print(f"    {u.split('/')[2]}: {sp} MB/s")
+                      if sp > bs: bs, best = sp, (u, r)
+                  if not best: continue
+                  url, ref = best
+                  print(f"  Scelto: {url.split('/')[2]} ({bs} MB/s)")
+                  fn = f"{OUT}/{PREFIX}_{i}.mp4"
+                  subprocess.run(["yt-dlp","--no-warnings","--concurrent-fragments","16","-N","16",
+                                  "--retries","10","--referer", ref, "--user-agent", UA,
+                                  "-o", f"{OUT}/{PREFIX}_{i}.%(ext)s",
+                                  "--merge-output-format","mp4", url], check=True)
+                  subprocess.run(["rclone","copy",fn,f"gdrive:{DRIVE}/","--progress"], check=True)
+                  os.remove(fn)
+              except Exception as e: print(f"  Errore: {e}")
+
+          browser.close(); pw.stop()
+          print("\nFinito!")
+          EOF
