@@ -4,14 +4,14 @@ on:
   workflow_dispatch:
     inputs:
       anime_url:
-        description: 'URL pagina anime (es. https://www.animesaturn.cx/anime/...)'
+        description: 'URL pagina anime'
         required: true
       prefix:
-        description: 'Prefisso file (es. Bleach)'
+        description: 'Prefisso file'
         required: true
         default: 'Anime'
       drive_folder:
-        description: 'Cartella Drive (es. Anime/Bleach/2)'
+        description: 'Cartella Drive'
         required: true
         default: 'Anime'
 
@@ -24,7 +24,8 @@ jobs:
         run: |
           sudo apt update -qq
           sudo apt install -y ffmpeg rclone
-          pip install yt-dlp requests cloudscraper
+          pip install yt-dlp playwright playwright-stealth requests
+          playwright install chromium --with-deps
 
       - name: Configura rclone
         run: |
@@ -38,59 +39,11 @@ jobs:
           DRIVE_FOLDER: ${{ github.event.inputs.drive_folder }}
         run: |
           python3 <<'EOF'
-          import os, re, subprocess, time, cloudscraper
-          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-          ANIME_URL = os.environ["ANIME_URL"]
-          PREFIX    = os.environ["PREFIX"]
-          DRIVE     = os.environ["DRIVE_FOLDER"]
-          OUT = "/tmp/out"; os.makedirs(OUT, exist_ok=True)
-          S = cloudscraper.create_scraper(browser={'browser':'chrome','platform':'windows','desktop':True})
+          import os, re, subprocess, time, requests
+          from playwright.sync_api import sync_playwright
+          try:
+              from playwright_stealth import stealth_sync
+          except ImportError:
+              stealth_sync = None
 
-          def speed(url, ref):
-              try:
-                  r = S.get(url, headers={"Referer": ref, "Range": "bytes=0-2097151"}, stream=True, timeout=8)
-                  t0, tot = time.time(), 0
-                  for c in r.iter_content(8192): tot += len(c)
-                  dt = time.time() - t0
-                  return round((tot/1024/1024)/dt, 2) if dt > 0 else 0
-              except: return 0
-
-          html = S.get(ANIME_URL).text
-          print(f"DEBUG html len: {len(html)}")
-          print(f"DEBUG primi 500 char: {html[:500]}")
-          eps = sorted(set(re.findall(r'https?://[^"\'<>]*?/ep/[^"\'<>]+', html)),
-                       key=lambda u: int(re.search(r'ep-(\d+)$', u).group(1)) if re.search(r'ep-(\d+)$', u) else 9999)
-          print(f"Trovati {len(eps)} episodi")
-
-          for i, ep in enumerate(eps, 1):
-              print(f"\n=== Ep {i} ===")
-              try:
-                  page = S.get(ep).text
-                  watches = list(set(re.findall(r'https?://[^"\'<>]*?/watch\?[^"\'<>]+', page)))
-                  cands = []
-                  for w in watches:
-                      try:
-                          wp = S.get(w, timeout=10).text
-                          m = re.search(r'https?://[^\s"\'<>]+\.(m3u8|mp4)[^\s"\'<>]*', wp)
-                          if m: cands.append((m.group(0), w))
-                      except: pass
-                  cands = list({u:(u,r) for u,r in cands}.values())
-                  if not cands: print("  Nessuno stream"); continue
-                  best, bs = None, 0
-                  for u, r in cands:
-                      sp = speed(u, r)
-                      print(f"    {u.split('/')[2]}: {sp} MB/s")
-                      if sp > bs: bs, best = sp, (u, r)
-                  if not best: continue
-                  url, ref = best
-                  print(f"  Scelto: {url.split('/')[2]} ({bs} MB/s)")
-                  fn = f"{OUT}/{PREFIX}_{i}.mp4"
-                  subprocess.run(["yt-dlp","--no-warnings","--concurrent-fragments","16","-N","16",
-                                  "--retries","10","--referer", ref, "--user-agent", UA,
-                                  "-o", f"{OUT}/{PREFIX}_{i}.%(ext)s",
-                                  "--merge-output-format","mp4", url], check=True)
-                  subprocess.run(["rclone","copy",fn,f"gdrive:{DRIVE}/","--progress"], check=True)
-                  os.remove(fn)
-              except Exception as e: print(f"  Errore: {e}")
-          print("\nFinito!")
-          EOF
+          UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit
