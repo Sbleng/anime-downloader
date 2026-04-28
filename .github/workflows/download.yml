@@ -24,7 +24,7 @@ jobs:
         run: |
           sudo apt update -qq
           sudo apt install -y ffmpeg rclone
-          pip install yt-dlp requests
+          pip install yt-dlp requests cloudscraper
 
       - name: Configura rclone
         run: |
@@ -38,13 +38,13 @@ jobs:
           DRIVE_FOLDER: ${{ github.event.inputs.drive_folder }}
         run: |
           python3 <<'EOF'
-          import os, re, requests, subprocess, time
+          import os, re, subprocess, time, cloudscraper
           UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
           ANIME_URL = os.environ["ANIME_URL"]
           PREFIX    = os.environ["PREFIX"]
           DRIVE     = os.environ["DRIVE_FOLDER"]
           OUT = "/tmp/out"; os.makedirs(OUT, exist_ok=True)
-          S = requests.Session(); S.headers.update({"User-Agent": UA})
+          S = cloudscraper.create_scraper(browser={'browser':'chrome','platform':'windows','desktop':True})
 
           def speed(url, ref):
               try:
@@ -56,6 +56,8 @@ jobs:
               except: return 0
 
           html = S.get(ANIME_URL).text
+          print(f"DEBUG html len: {len(html)}")
+          print(f"DEBUG primi 500 char: {html[:500]}")
           eps = sorted(set(re.findall(r'https?://[^"\'<>]*?/ep/[^"\'<>]+', html)),
                        key=lambda u: int(re.search(r'ep-(\d+)$', u).group(1)) if re.search(r'ep-(\d+)$', u) else 9999)
           print(f"Trovati {len(eps)} episodi")
@@ -87,7 +89,6 @@ jobs:
                                   "--retries","10","--referer", ref, "--user-agent", UA,
                                   "-o", f"{OUT}/{PREFIX}_{i}.%(ext)s",
                                   "--merge-output-format","mp4", url], check=True)
-                  # upload immediato e cancella locale
                   subprocess.run(["rclone","copy",fn,f"gdrive:{DRIVE}/","--progress"], check=True)
                   os.remove(fn)
               except Exception as e: print(f"  Errore: {e}")
